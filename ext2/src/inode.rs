@@ -143,6 +143,13 @@ impl InodeBlock {
         self.set_block_id(Self::INDIRECT_BLOCK_TABLE_ID, block_id)
     }
 
+    /// Get the block id used as the indirect block table.
+    pub fn indirect_block_table(&self) -> BlockId {
+        let offset = Self::INDIRECT_BLOCK_TABLE_ID * std::mem::size_of::<BlockId>();
+        BlockId::read_from_bytes(&self.0[offset..offset + std::mem::size_of::<BlockId>()])
+            .expect("BlockId must be readable from 4 bytes")
+    }
+
     /// Set a block id to be used as the double indirect block table.
     pub fn set_double_indirect_block_table(&mut self, block_id: &BlockId) -> Result<()> {
         self.set_block_id(Self::DOUBLE_INDIRECT_BLOCK_TABLE_ID, block_id)

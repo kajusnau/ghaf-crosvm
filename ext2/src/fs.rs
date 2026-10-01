@@ -318,9 +318,30 @@ impl<'a> Ext2<'a> {
             .has_enough_space(name)
         {
             let idx = self.dir_entries.get(&parent).unwrap().len();
+            if idx >= InodeBlock::NUM_DIRECT_BLOCKS + BLOCK_SIZE / 4 {
+                bail!("directory {:?} needs more than {} blocks", parent, idx);
+            }
             let block_id = self.allocate_block()?;
+            if idx < InodeBlock::NUM_DIRECT_BLOCKS {
+                let parent_inode = self.get_inode_mut(parent)?;
+                parent_inode.block.set_block_id(idx, &block_id)?;
+            } else {
+                let indirect_table = if idx == InodeBlock::NUM_DIRECT_BLOCKS {
+                    let table = self.allocate_block()?;
+                    let parent_inode = self.get_inode_mut(parent)?;
+                    parent_inode.block.set_indirect_block_table(&table)?;
+                    parent_inode.blocks.add(BLOCK_SIZE as u32);
+                    table
+                } else {
+                    self.get_inode_mut(parent)?.block.indirect_block_table()
+                };
+                arena.write_to_mem(
+                    indirect_table,
+                    (idx - InodeBlock::NUM_DIRECT_BLOCKS) * 4,
+                    &block_id,
+                )?;
+            }
             let parent_inode = self.get_inode_mut(parent)?;
-            parent_inode.block.set_block_id(idx, &block_id)?;
             parent_inode.blocks.add(BLOCK_SIZE as u32);
             parent_inode.size += BLOCK_SIZE as u32;
             self.dir_entries
