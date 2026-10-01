@@ -1322,11 +1322,11 @@ pub fn create_pmem_ext2_device(
     pmem_device_tube: Tube,
     worker_process_pids: &mut BTreeSet<Pid>,
 ) -> DeviceResult {
-    let mapping_size = opts.size as u64;
+    let mapping_size = opts.size;
     let builder = ext2::Builder {
         inodes_per_group: opts.inodes_per_group,
         blocks_per_group: opts.blocks_per_group,
-        size: mapping_size as u32,
+        size: mapping_size,
         ..Default::default()
     };
 

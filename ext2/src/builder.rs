@@ -28,7 +28,7 @@ pub struct Builder {
     /// The number of inodes per group.
     pub inodes_per_group: u32,
     /// The size of the memory region.
-    pub size: u32,
+    pub size: u64,
     /// The roof directory to be copied to the file system.
     pub root_dir: Option<PathBuf>,
 }
@@ -47,7 +47,7 @@ impl Default for Builder {
 impl Builder {
     /// Validates field values and adjusts them if needed.
     fn validate(&mut self) -> Result<()> {
-        let block_group_size = BLOCK_SIZE as u32 * self.blocks_per_group;
+        let block_group_size = BLOCK_SIZE as u64 * self.blocks_per_group as u64;
         if self.size < block_group_size {
             bail!(
             "memory size {} is too small to have a block group: block_size={},  block_per_group={}",

@@ -4,6 +4,7 @@
 
 //! Defines the superblock structure.
 
+use anyhow::Context;
 use anyhow::Result;
 use zerocopy::FromBytes;
 use zerocopy::Immutable;
@@ -64,7 +65,16 @@ impl SuperBlock {
         const EXT2_MAGIC_NUMBER: u16 = 0xEF53;
         const COMPAT_EXT_ATTR: u32 = 0x8;
 
-        let num_groups = cfg.size / (cfg.blocks_per_group * BLOCK_SIZE as u32);
+        let num_groups = cfg.size / (cfg.blocks_per_group as u64 * BLOCK_SIZE as u64);
+        // num_groups() is a u16, and the block and inode counts are u32 on disk.
+        let num_groups = u16::try_from(num_groups)
+            .ok()
+            .map(u32::from)
+            .filter(|n| {
+                n.checked_mul(cfg.blocks_per_group).is_some()
+                    && n.checked_mul(cfg.inodes_per_group).is_some()
+            })
+            .with_context(|| format!("{} bytes is too large for an ext2 image", cfg.size))?;
         let blocks_per_group = cfg.blocks_per_group;
         let inodes_per_group = cfg.inodes_per_group;
 
