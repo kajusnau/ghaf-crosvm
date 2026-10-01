@@ -64,7 +64,7 @@ impl SuperBlock {
         const EXT2_MAGIC_NUMBER: u16 = 0xEF53;
         const COMPAT_EXT_ATTR: u32 = 0x8;
 
-        let num_groups = cfg.size / (cfg.blocks_per_group * BLOCK_SIZE as u32);
+        let num_groups = (cfg.size / (cfg.blocks_per_group as u64 * BLOCK_SIZE as u64)) as u32;
         let blocks_per_group = cfg.blocks_per_group;
         let inodes_per_group = cfg.inodes_per_group;
 

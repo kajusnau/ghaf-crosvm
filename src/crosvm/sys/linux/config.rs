@@ -292,7 +292,7 @@ pub struct PmemExt2Option {
     pub path: PathBuf,
     pub blocks_per_group: u32,
     pub inodes_per_group: u32,
-    pub size: u32,
+    pub size: u64,
     pub ugid: (Option<u32>, Option<u32>),
     pub uid_map: String,
     pub gid_map: String,
@@ -302,7 +302,7 @@ impl Default for PmemExt2Option {
     fn default() -> Self {
         let blocks_per_group = 4096;
         let inodes_per_group = 1024;
-        let size = ext2::BLOCK_SIZE as u32 * blocks_per_group; // only one block group
+        let size = ext2::BLOCK_SIZE as u64 * blocks_per_group as u64; // only one block group
         let ugid_cfg = UgidConfig::default();
         Self {
             path: Default::default(),
@@ -1065,6 +1065,13 @@ mod tests {
         assert_eq!(opt.path, PathBuf::from("/path/to/dir"));
         assert_eq!(opt.blocks_per_group, blocks_per_group);
         assert_eq!(opt.inodes_per_group, inodes_per_group);
+        assert_eq!(opt.size, u64::from(size));
+    }
+
+    #[test]
+    fn parse_pmem_ext2_size_over_4g() {
+        let size: u64 = 8 << 30;
+        let opt = parse_pmem_ext2_option(&format!("/path/to/dir:size={size}")).unwrap();
         assert_eq!(opt.size, size);
     }
 }

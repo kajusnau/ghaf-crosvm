@@ -35,7 +35,7 @@ mod linux {
         /// size of memory region in bytes.
         /// If it's not a multiple of 4096, it will be rounded up to the next multiple of 4096.
         #[argh(option, default = "4194304")]
-        size: u32,
+        size: u64,
 
         /// if sepecified, create a file systeon on RAM, but do not write to disk.
         #[argh(switch, short = 'j')]

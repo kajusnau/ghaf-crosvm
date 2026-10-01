@@ -123,7 +123,7 @@ fn test_mkfs_empty_multi_block_groups() {
         Builder {
             blocks_per_group,
             inodes_per_group: 4096,
-            size: 4096 * blocks_per_group * num_groups,
+            size: (4096 * blocks_per_group * num_groups).into(),
             ..Default::default()
         },
     );
@@ -642,7 +642,7 @@ fn test_multiple_bg_multi_inode_bitmap() {
         Builder {
             blocks_per_group,
             inodes_per_group,
-            size: BLOCK_SIZE * blocks_per_group * num_groups,
+            size: (BLOCK_SIZE * blocks_per_group * num_groups).into(),
             root_dir: Some(dir.clone()),
         },
     );
@@ -681,7 +681,7 @@ fn test_multiple_bg_multi_block_bitmap() {
         Builder {
             blocks_per_group,
             inodes_per_group,
-            size: BLOCK_SIZE * blocks_per_group * num_groups,
+            size: (BLOCK_SIZE * blocks_per_group * num_groups).into(),
             root_dir: Some(dir.clone()),
         },
     );
@@ -719,7 +719,7 @@ fn test_multiple_bg_big_files() {
         Builder {
             blocks_per_group,
             inodes_per_group: 1024,
-            size: BLOCK_SIZE * blocks_per_group * num_groups,
+            size: (BLOCK_SIZE * blocks_per_group * num_groups).into(),
             root_dir: Some(dir.clone()),
         },
     );
