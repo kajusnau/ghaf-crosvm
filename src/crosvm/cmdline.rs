@@ -1690,7 +1690,11 @@ pub struct RunCommand {
     ///       The number of block groups in the file system is
     ///       calculated from this value and other given parameters.
     ///       The value of `size` must be larger than (4096 *
-    ///        blocks_per_group.) (default: 16777216)
+    ///        blocks_per_group.) (default: 16777216, or just
+    ///       large enough for the tree when `paths` is given)
+    ///     paths=FILE - File listing absolute paths, one per line.
+    ///       Only the top-level entries of PATH whose names match
+    ///       their file names are copied.
     ///     uid=UID - uid of the mkfs process in the user
     ///       namespace created by minijail. (default: 0)
     ///     gid=GID - gid of the mkfs process in the user

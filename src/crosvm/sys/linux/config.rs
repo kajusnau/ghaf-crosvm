@@ -292,7 +292,8 @@ pub struct PmemExt2Option {
     pub path: PathBuf,
     pub blocks_per_group: u32,
     pub inodes_per_group: u32,
-    pub size: u64,
+    pub size: Option<u64>,
+    pub paths: Option<PathBuf>,
     pub ugid: (Option<u32>, Option<u32>),
     pub uid_map: String,
     pub gid_map: String,
@@ -302,13 +303,13 @@ impl Default for PmemExt2Option {
     fn default() -> Self {
         let blocks_per_group = 4096;
         let inodes_per_group = 1024;
-        let size = ext2::BLOCK_SIZE as u64 * blocks_per_group as u64; // only one block group
         let ugid_cfg = UgidConfig::default();
         Self {
             path: Default::default(),
             blocks_per_group,
             inodes_per_group,
-            size,
+            size: None,
+            paths: None,
             ugid: (ugid_cfg.uid, ugid_cfg.gid),
             uid_map: ugid_cfg.uid_map,
             gid_map: ugid_cfg.gid_map,
@@ -349,10 +350,13 @@ pub fn parse_pmem_ext2_option(param: &str) -> Result<PmemExt2Option, String> {
                     })?
                 }
                 "size" => {
-                    opt.size = value
-                        .parse()
-                        .map_err(|e| format!("failed to parse memory size '{value}': {e:#}"))?
+                    opt.size = Some(
+                        value
+                            .parse()
+                            .map_err(|e| format!("failed to parse memory size '{value}': {e:#}"))?,
+                    )
                 }
+                "paths" => opt.paths = Some(PathBuf::from(value)),
                 _ => return Err(format!("invalid `pmem-ext2` option: {kind}")),
             }
         }
@@ -1065,13 +1069,21 @@ mod tests {
         assert_eq!(opt.path, PathBuf::from("/path/to/dir"));
         assert_eq!(opt.blocks_per_group, blocks_per_group);
         assert_eq!(opt.inodes_per_group, inodes_per_group);
-        assert_eq!(opt.size, u64::from(size));
+        assert_eq!(opt.size, Some(u64::from(size)));
     }
 
     #[test]
     fn parse_pmem_ext2_size_over_4g() {
         let size: u64 = 8 << 30;
         let opt = parse_pmem_ext2_option(&format!("/path/to/dir:size={size}")).unwrap();
-        assert_eq!(opt.size, size);
+        assert_eq!(opt.size, Some(size));
+    }
+
+    #[test]
+    fn parse_pmem_ext2_paths() {
+        let opt = parse_pmem_ext2_option("/path:paths=/tmp/list:blocks_per_group=32768").unwrap();
+        assert_eq!(opt.paths, Some(PathBuf::from("/tmp/list")));
+        assert_eq!(opt.blocks_per_group, 32768);
+        assert_eq!(opt.size, None);
     }
 }

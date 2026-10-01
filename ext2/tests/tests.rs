@@ -670,6 +670,7 @@ fn test_multiple_bg_multi_inode_bitmap() {
             inodes_per_group,
             size: (BLOCK_SIZE * blocks_per_group * num_groups).into(),
             root_dir: Some(dir.clone()),
+            paths: None,
         },
     );
 
@@ -709,6 +710,7 @@ fn test_multiple_bg_multi_block_bitmap() {
             inodes_per_group,
             size: (BLOCK_SIZE * blocks_per_group * num_groups).into(),
             root_dir: Some(dir.clone()),
+            paths: None,
         },
     );
 
@@ -747,6 +749,7 @@ fn test_multiple_bg_big_files() {
             inodes_per_group: 1024,
             size: (BLOCK_SIZE * blocks_per_group * num_groups).into(),
             root_dir: Some(dir.clone()),
+            paths: None,
         },
     );
 
@@ -813,4 +816,51 @@ fn test_mkfs_xattr_impl() {
 #[test]
 fn test_mkfs_xattr() {
     call_test_with_sudo("test_mkfs_xattr_impl")
+}
+
+#[test]
+fn test_mkfs_paths_allowlist() {
+    // testdata
+    // ├── a.txt
+    // ├── b
+    // │   └── c.txt
+    // └── d.txt  (not listed)
+    let td = tempdir().unwrap();
+    let dir = td.path().join("testdata");
+    create_dir(&dir).unwrap();
+    File::create(dir.join("a.txt")).unwrap();
+    create_dir(dir.join("b")).unwrap();
+    fs::write(dir.join("b/c.txt"), vec![1u8; 100 * BLOCK_SIZE as usize]).unwrap();
+    File::create(dir.join("d.txt")).unwrap();
+    let list = td.path().join("paths");
+    fs::write(&list, "/nix/store/a.txt\n\n/nix/store/b\n").unwrap();
+
+    let mut builder = Builder {
+        blocks_per_group: 1024,
+        inodes_per_group: 1024,
+        root_dir: Some(dir.clone()),
+        paths: Some(ext2::read_paths_file(&list).unwrap()),
+        ..Default::default()
+    };
+    builder.set_auto_size(&dir).unwrap();
+    assert_eq!(builder.size, 4096 * 1024);
+    let disk = mkfs(&td, builder);
+
+    fs::remove_file(dir.join("d.txt")).unwrap();
+    assert_eq_dirs(&td, &dir, &disk, None);
+}
+
+#[test]
+fn test_mkfs_paths_missing() {
+    let td = tempdir().unwrap();
+    let dir = td.path().join("testdata");
+    create_dir(&dir).unwrap();
+    File::create(dir.join("a.txt")).unwrap();
+
+    let mut builder = Builder {
+        root_dir: Some(dir.clone()),
+        paths: Some(vec!["a.txt".into(), "missing".into()]),
+        ..Default::default()
+    };
+    assert!(builder.set_auto_size(&dir).is_err());
 }

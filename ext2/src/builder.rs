@@ -4,6 +4,8 @@
 
 //! Provides structs and logic to build ext2 file system with configurations.
 
+use std::ffi::OsString;
+use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::bail;
@@ -31,6 +33,8 @@ pub struct Builder {
     pub size: u64,
     /// The roof directory to be copied to the file system.
     pub root_dir: Option<PathBuf>,
+    /// If set, only these top-level entries of `root_dir` are copied.
+    pub paths: Option<Vec<OsString>>,
 }
 
 impl Default for Builder {
@@ -40,6 +44,7 @@ impl Default for Builder {
             inodes_per_group: 4096,
             size: 4096 * 4096,
             root_dir: None,
+            paths: None,
         }
     }
 }
@@ -63,6 +68,18 @@ impl Builder {
         Ok(())
     }
 
+    /// Sets `size` to the smallest size that fits `src_dir` filtered by `paths`.
+    pub fn set_auto_size(&mut self, src_dir: &Path) -> Result<()> {
+        self.size = crate::fs::auto_size(
+            src_dir,
+            self.paths.as_deref(),
+            self.blocks_per_group,
+            self.inodes_per_group,
+        )
+        .context("failed to compute the ext2 size")?;
+        Ok(())
+    }
+
     /// Allocates memory region with the given configuration.
     pub fn allocate_memory(mut self) -> Result<MemRegion> {
         self.validate()
@@ -83,6 +100,22 @@ impl Builder {
     }
 }
 
+/// Reads a file of absolute paths, one per line, and returns their file names.
+pub fn read_paths_file(path: &Path) -> Result<Vec<OsString>> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read paths file {:?}", path))?;
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            Path::new(l.trim())
+                .file_name()
+                .map(OsString::from)
+                .with_context(|| format!("invalid path {:?} in {:?}", l, path))
+        })
+        .collect()
+}
+
 /// Memory region for ext2 with its config.
 pub struct MemRegion {
     cfg: Builder,
@@ -95,7 +128,7 @@ impl MemRegion {
         let arena = Arena::new(BLOCK_SIZE, &mut self.mem).context("failed to allocate arena")?;
         let mut ext2 = Ext2::new(&self.cfg, &arena).context("failed to create Ext2 struct")?;
         if let Some(dir) = self.cfg.root_dir {
-            ext2.copy_dirtree(&arena, dir)
+            ext2.copy_dirtree(&arena, dir, self.cfg.paths.as_deref())
                 .context("failed to copy directory tree")?;
         }
         ext2.copy_backup_metadata(&arena)

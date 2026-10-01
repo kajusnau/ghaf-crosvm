@@ -149,6 +149,7 @@ mod test {
                 blocks_per_group,
                 size: size.into(),
                 root_dir: None,
+                paths: None,
             },
         )
         .unwrap();
@@ -203,6 +204,7 @@ mod test {
                 blocks_per_group,
                 size: mem_size.into(),
                 root_dir: None,
+                paths: None,
             },
         )
         .unwrap();
