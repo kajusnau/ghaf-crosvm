@@ -611,6 +611,32 @@ fn test_multiple_block_directory_entry() {
     assert_eq_dirs(&td, &dir, &disk, None); // skip xattr check
 }
 
+#[test]
+fn test_indirect_block_directory_entry() {
+    // Directory entries need more than 12 blocks, so the indirect block is used.
+    let td = tempdir().unwrap();
+    let dir = td.path().join("testdata");
+
+    std::fs::create_dir(&dir).unwrap();
+
+    for i in 0..2000 {
+        let path = dir.join(format!("{i:040}"));
+        File::create(&path).unwrap();
+    }
+
+    let disk = mkfs(
+        &td,
+        Builder {
+            blocks_per_group: 2048,
+            inodes_per_group: 4096,
+            root_dir: Some(dir.clone()),
+            ..Default::default()
+        },
+    );
+
+    assert_eq_dirs(&td, &dir, &disk, None);
+}
+
 // Test a case where the inode tables spans multiple block groups.
 #[test]
 fn test_multiple_bg_multi_inode_bitmap() {
