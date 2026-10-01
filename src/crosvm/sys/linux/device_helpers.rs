@@ -1322,13 +1322,22 @@ pub fn create_pmem_ext2_device(
     pmem_device_tube: Tube,
     worker_process_pids: &mut BTreeSet<Pid>,
 ) -> DeviceResult {
-    let mapping_size = opts.size;
-    let builder = ext2::Builder {
+    let mut builder = ext2::Builder {
         inodes_per_group: opts.inodes_per_group,
         blocks_per_group: opts.blocks_per_group,
-        size: mapping_size,
+        size: opts
+            .size
+            .unwrap_or(ext2::BLOCK_SIZE as u64 * opts.blocks_per_group as u64),
         ..Default::default()
     };
+    if let Some(paths) = &opts.paths {
+        builder.paths = Some(ext2::read_paths_file(paths)?);
+        if opts.size.is_none() {
+            // The mmio window is sized here, before the mkfs process walks the tree.
+            builder.set_auto_size(&opts.path)?;
+        }
+    }
+    let mapping_size = builder.size;
 
     let max_open_files = base::linux::max_open_files()
         .context("failed to get max number of open files")?

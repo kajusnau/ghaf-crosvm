@@ -10,6 +10,7 @@ mod linux {
     use std::io::Write;
     use std::path::PathBuf;
 
+    use anyhow::Context;
     use argh::FromArgs;
     use base::MappedRegion;
 
@@ -34,8 +35,13 @@ mod linux {
 
         /// size of memory region in bytes.
         /// If it's not a multiple of 4096, it will be rounded up to the next multiple of 4096.
-        #[argh(option, default = "4194304")]
-        size: u64,
+        /// Defaults to 4194304, or to the size the tree needs when --paths is given.
+        #[argh(option)]
+        size: Option<u64>,
+
+        /// file listing the top-level entries of --src to copy, one absolute path per line
+        #[argh(option)]
+        paths: Option<String>,
 
         /// if sepecified, create a file systeon on RAM, but do not write to disk.
         #[argh(switch, short = 'j')]
@@ -45,12 +51,21 @@ mod linux {
     pub fn main() -> anyhow::Result<()> {
         let args: Args = argh::from_env();
         let src_dir = args.src.as_ref().map(|s| PathBuf::new().join(s));
-        let builder = ext2::Builder {
+        let mut builder = ext2::Builder {
             blocks_per_group: args.blocks_per_group,
             inodes_per_group: args.inodes_per_group,
-            size: args.size,
+            size: args.size.unwrap_or(4194304),
             root_dir: src_dir,
+            paths: None,
         };
+        if let Some(paths) = &args.paths {
+            builder.paths = Some(ext2::read_paths_file(paths.as_ref())?);
+            if args.size.is_none() {
+                let src = builder.root_dir.clone().context("--paths requires --src")?;
+                builder.set_auto_size(&src)?;
+            }
+        }
+        println!("size: {}", builder.size);
         let mem = builder.allocate_memory()?.build_mmap_info()?.do_mmap()?;
         if args.dry_run {
             println!("Done!");

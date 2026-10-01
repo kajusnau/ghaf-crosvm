@@ -6,6 +6,7 @@
 // a filesystem in memory.
 
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs::DirEntry;
@@ -739,6 +740,7 @@ impl<'a> Ext2<'a> {
         &mut self,
         arena: &'a Arena<'a>,
         src_dir: P,
+        paths: Option<&[OsString]>,
     ) -> Result<()> {
         // Update the root directory's metadata with the metadata of `src_dir`.
         let root_inode_num = InodeNum::new(2).expect("2 is a valid inode number");
@@ -754,7 +756,7 @@ impl<'a> Ext2<'a> {
             .with_context(|| format!("failed to get metadata of {:?}", src_dir.as_ref()))?;
         inode.update_metadata(&metadata);
 
-        self.copy_dirtree_rec(arena, InodeNum(2), src_dir)
+        self.copy_dirtree_rec(arena, InodeNum(2), src_dir, paths)
     }
 
     fn copy_dirtree_rec<P: AsRef<Path>>(
@@ -762,9 +764,9 @@ impl<'a> Ext2<'a> {
         arena: &'a Arena<'a>,
         parent_inode: InodeNum,
         src_dir: P,
+        paths: Option<&[OsString]>,
     ) -> Result<()> {
-        for entry in std::fs::read_dir(&src_dir)? {
-            let entry = entry?;
+        for entry in dir_entries(src_dir.as_ref(), paths)? {
             let ftype = entry.file_type()?;
             if ftype.is_dir() {
                 // Since we creates `/lost+found` on the root directory, ignore the existing one.
@@ -782,7 +784,7 @@ impl<'a> Ext2<'a> {
                             inode
                         )
                     })?;
-                self.copy_dirtree_rec(arena, inode, entry.path())?;
+                self.copy_dirtree_rec(arena, inode, entry.path(), None)?;
             } else if ftype.is_file() {
                 self.add_file(arena, parent_inode, &entry.path())
                     .with_context(|| {
@@ -816,5 +818,159 @@ impl<'a> Ext2<'a> {
             }
         }
         Ok(())
+    }
+}
+
+/// Lists `dir`, keeping only the entries named in `paths` when it is given.
+fn dir_entries(dir: &Path, paths: Option<&[OsString]>) -> Result<Vec<DirEntry>> {
+    let entries = std::fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    let Some(paths) = paths else {
+        return Ok(entries);
+    };
+    let mut wanted: HashSet<&OsStr> = paths.iter().map(OsString::as_os_str).collect();
+    let entries: Vec<_> = entries
+        .into_iter()
+        .filter(|e| wanted.remove(e.file_name().as_os_str()))
+        .collect();
+    if let Some(missing) = wanted.iter().next() {
+        bail!("{:?} is not in {:?}", missing, dir);
+    }
+    Ok(entries)
+}
+
+/// Counts the blocks and inodes that copying `dir` (filtered by `paths`) allocates.
+fn count_usage(dir: &Path, paths: Option<&[OsString]>, root: bool) -> Result<(u64, u64)> {
+    let entries = dir_entries(dir, paths)?;
+    let mut names: Vec<OsString> = vec![".".into(), "..".into()];
+    if root {
+        names.push("lost+found".into());
+    }
+    let (mut blocks, mut inodes) = (0, 0);
+    for entry in entries {
+        let ftype = entry.file_type()?;
+        if root && ftype.is_dir() && entry.file_name() == "lost+found" {
+            continue;
+        }
+        inodes += 1;
+        if ftype.is_dir() {
+            let (b, i) = count_usage(&entry.path(), None, false)?;
+            blocks += b;
+            inodes += i;
+        } else if ftype.is_file() {
+            let n = entry.metadata()?.len().div_ceil(BLOCK_SIZE as u64);
+            let direct = InodeBlock::NUM_DIRECT_BLOCKS as u64;
+            let per_table = BLOCK_SIZE as u64 / 4;
+            blocks += n;
+            if n > direct {
+                blocks += 1;
+            }
+            if n > direct + per_table {
+                blocks += 1 + (n - direct - per_table).div_ceil(per_table);
+            }
+        } else if ftype.is_symlink()
+            && std::fs::read_link(entry.path())?.as_os_str().len()
+                >= InodeBlock::max_inline_symlink_len()
+        {
+            blocks += 1;
+        }
+        names.push(entry.file_name());
+    }
+    blocks += dir_blocks(&names);
+    Ok((blocks, inodes))
+}
+
+/// Number of blocks `allocate_dir_entry` uses for a directory holding `names`.
+fn dir_blocks(names: &[OsString]) -> u64 {
+    let entry_size = std::mem::size_of::<DirEntryRaw>();
+    let (mut blocks, mut offset) = (1, 0);
+    for name in names {
+        let len = entry_size + name.len().next_multiple_of(4);
+        if offset + len > BLOCK_SIZE {
+            blocks += 1;
+            offset = 0;
+        }
+        offset += len;
+    }
+    if blocks > InodeBlock::NUM_DIRECT_BLOCKS as u64 {
+        blocks += 1;
+    }
+    blocks
+}
+
+/// Smallest image size that fits `src_dir` filtered by `paths`, in whole block groups.
+pub(crate) fn auto_size(
+    src_dir: &Path,
+    paths: Option<&[OsString]>,
+    blocks_per_group: u32,
+    inodes_per_group: u32,
+) -> Result<u64> {
+    let (mut blocks, mut inodes) = count_usage(src_dir, paths, true)?;
+    // lost+found's own directory block, and the 10 reserved inodes plus lost+found.
+    blocks += 1;
+    inodes += 11;
+    let inode_table =
+        (inodes_per_group as u64 * Inode::INODE_RECORD_SIZE as u64).div_ceil(BLOCK_SIZE as u64);
+    let gd_size = std::mem::size_of::<BlockGroupDescriptor>() as u64;
+    let mut groups = inodes.div_ceil(inodes_per_group as u64).max(1);
+    loop {
+        let gds = (gd_size * groups).div_ceil(BLOCK_SIZE as u64);
+        // Superblock, descriptor table, block and inode bitmaps, and inode table.
+        let overhead = 1 + gds + 2 + inode_table;
+        let usable = (blocks_per_group as u64)
+            .checked_sub(overhead)
+            .filter(|&u| u > 0)
+            .context("block group too small for its metadata")?;
+        let needed = blocks.div_ceil(usable);
+        if needed <= groups {
+            return Ok(groups * blocks_per_group as u64 * BLOCK_SIZE as u64);
+        }
+        groups = needed;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn assert_auto_size_fits(dir: &Path, paths: Vec<OsString>, min_groups: u64) {
+        let mut builder = Builder {
+            blocks_per_group: 1024,
+            inodes_per_group: 1024,
+            root_dir: Some(dir.to_path_buf()),
+            paths: Some(paths),
+            ..Default::default()
+        };
+        builder.set_auto_size(dir).unwrap();
+        let group_size = 1024 * BLOCK_SIZE as u64;
+        assert_eq!(builder.size % group_size, 0);
+        assert!(builder.size / group_size >= min_groups);
+        builder
+            .allocate_memory()
+            .unwrap()
+            .build_mmap_info()
+            .unwrap();
+    }
+
+    #[test]
+    fn auto_size_inode_bound() {
+        let td = tempdir().unwrap();
+        let sub = td.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        for i in 0..3000 {
+            File::create(sub.join(i.to_string())).unwrap();
+        }
+        assert_auto_size_fits(td.path(), vec!["sub".into()], 3);
+    }
+
+    #[test]
+    fn auto_size_block_bound() {
+        let td = tempdir().unwrap();
+        let file = File::create(td.path().join("big")).unwrap();
+        file.set_len(3000 * BLOCK_SIZE as u64).unwrap();
+        assert_auto_size_fits(td.path(), vec!["big".into()], 3);
     }
 }
