@@ -22,11 +22,14 @@
 //! 6. At (b): memory slot number is sent to (c).
 //! 7. At (c): device activation finished.
 
+use std::fs::OpenOptions;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
 use base::error;
+use base::linux::SharedMemoryLinux;
 use base::AsRawDescriptor;
 use base::Pid;
 use base::SharedMemory;
@@ -50,6 +53,7 @@ pub fn launch(
     ugid: &(Option<u32>, Option<u32>),
     ugid_map: (&str, &str),
     mut builder: ext2::Builder,
+    backing_dir: Option<&Path>,
     jail_config: Option<&JailConfig>,
 ) -> Result<Pid> {
     let max_open_files = base::linux::max_open_files()
@@ -75,8 +79,22 @@ pub fn launch(
     // Use "/" in the new mount namespace as the root for mkfs.
     builder.root_dir = Some(std::path::PathBuf::from("/"));
 
-    let shm = SharedMemory::new("pmem_ext2_shm", builder.size as u64)
-        .context("failed to create shared memory")?;
+    let shm = match backing_dir {
+        Some(dir) => {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .custom_flags(libc::O_TMPFILE | libc::O_CLOEXEC)
+                .open(dir)
+                .with_context(|| format!("failed to create backing file in {}", dir.display()))?;
+            file.set_len(builder.size as u64)
+                .context("failed to size backing file")?;
+            SharedMemory::from_file(file).context("failed to create shared memory from file")?
+        }
+        None => SharedMemory::new("pmem_ext2_shm", builder.size as u64)
+            .context("failed to create shared memory")?,
+    };
     let mut keep_rds = vec![
         shm.as_raw_descriptor(),
         vm_memory_client.as_raw_descriptor(),

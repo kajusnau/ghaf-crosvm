@@ -1368,6 +1368,7 @@ pub fn create_pmem_ext2_device(
         &opts.ugid,
         (&opts.uid_map, &opts.gid_map),
         builder,
+        opts.backing_dir.as_deref(),
         jail_config,
     )
     .context("failed to spawn mkfs process")?;

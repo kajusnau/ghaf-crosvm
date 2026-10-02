@@ -1695,6 +1695,9 @@ pub struct RunCommand {
     ///     paths=FILE - File listing absolute paths, one per line.
     ///       Only the top-level entries of PATH whose names match
     ///       their file names are copied.
+    ///     backing_dir=DIR - Back the file system image with an
+    ///       unlinked file in DIR instead of anonymous shared
+    ///       memory, so its pages can be reclaimed.
     ///     uid=UID - uid of the mkfs process in the user
     ///       namespace created by minijail. (default: 0)
     ///     gid=GID - gid of the mkfs process in the user

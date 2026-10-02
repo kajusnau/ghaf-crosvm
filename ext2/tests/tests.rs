@@ -864,3 +864,40 @@ fn test_mkfs_paths_missing() {
     };
     assert!(builder.set_auto_size(&dir).is_err());
 }
+
+#[test]
+fn test_mkfs_on_file_backed_shm() {
+    use base::linux::SharedMemoryLinux;
+    use base::SharedMemory;
+
+    let td = tempdir().unwrap();
+    let path = td.path().join("backed.ext2");
+    let builder = Builder {
+        blocks_per_group: 1024,
+        inodes_per_group: 1024,
+        ..Default::default()
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .unwrap();
+    file.set_len(builder.size as u64).unwrap();
+    let shm = SharedMemory::from_file(file).unwrap();
+    let mem = builder
+        .build_on_shm(&shm)
+        .unwrap()
+        .build_mmap_info()
+        .unwrap()
+        .do_mmap()
+        .unwrap();
+    drop(mem);
+
+    run_fsck(&path);
+    assert_eq!(
+        run_debugfs_cmd(&["ls"], &path),
+        "2  (12) .    2  (12) ..    11  (4072) lost+found"
+    );
+}
