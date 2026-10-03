@@ -27,6 +27,7 @@ use std::path::Path;
 use anyhow::Context;
 use anyhow::Result;
 use base::error;
+use base::warn;
 use base::AsRawDescriptor;
 use base::Pid;
 use base::SharedMemory;
@@ -105,12 +106,16 @@ fn mkfs_callback(
     builder: ext2::Builder,
     shm: SharedMemory,
 ) -> Result<()> {
-    let file_mappings = builder
+    let region = builder
         .build_on_shm(&shm)
         .context("failed to build memory region")?
         .build_mmap_info()
-        .context("failed to build ext2")?
-        .mapping_info;
+        .context("failed to build ext2")?;
+    // Only this process maps most of the image, so only it can page it out.
+    if let Err(e) = region.page_out() {
+        warn!("{:#}", e);
+    }
+    let file_mappings = region.mapping_info;
 
     let file_mapping_info: Vec<_> = file_mappings
         .into_iter()
