@@ -12,6 +12,7 @@ geteuid: 1
 getrandom: 1
 lgetxattr: 1
 llistxattr: 1
+madvise: 1
 msync: 1
 mmap: arg2 in ~PROT_EXEC
 munmap: 1
