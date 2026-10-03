@@ -13,11 +13,17 @@ mod blockgroup;
 mod builder;
 mod fs;
 mod inode;
+mod mappings;
 mod superblock;
 mod xattr;
 
+pub use arena::FileMappingInfo;
 pub use blockgroup::BLOCK_SIZE;
 pub use builder::read_paths_file;
 pub use builder::Builder;
+pub use mappings::load_mappings;
+pub use mappings::read_mappings;
+pub use mappings::write_mappings;
+pub use mappings::MappingEntry;
 pub use xattr::dump_xattrs;
 pub use xattr::set_xattr;

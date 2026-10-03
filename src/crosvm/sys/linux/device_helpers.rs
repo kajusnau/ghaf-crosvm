@@ -1332,10 +1332,15 @@ pub fn create_pmem_ext2_device(
     };
     if let Some(paths) = &opts.paths {
         builder.paths = Some(ext2::read_paths_file(paths)?);
-        if opts.size.is_none() {
+        if opts.image.is_none() && opts.size.is_none() {
             // The mmio window is sized here, before the mkfs process walks the tree.
             builder.set_auto_size(&opts.path)?;
         }
+    }
+    if let Some(image) = &opts.image {
+        builder.size = std::fs::metadata(image)
+            .with_context(|| format!("failed to stat {}", image.display()))?
+            .len();
     }
     let mapping_size = builder.size;
 
@@ -1369,6 +1374,7 @@ pub fn create_pmem_ext2_device(
         (&opts.uid_map, &opts.gid_map),
         builder,
         opts.backing_dir.as_deref(),
+        opts.image.as_deref().zip(opts.mappings.as_deref()),
         jail_config,
     )
     .context("failed to spawn mkfs process")?;

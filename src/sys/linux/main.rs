@@ -78,6 +78,10 @@ pub(crate) fn cleanup() {
 pub(crate) fn run_command(command: Commands, _log_args: LogArgs) -> anyhow::Result<()> {
     match command {
         Commands::Devices(cmd) => start_devices(cmd).context("start_devices subcommand failed"),
+        Commands::MakePmemExt2(cmd) => {
+            crate::crosvm::sys::linux::ext2::make_image(&cmd.src, &cmd.image, &cmd.mappings)
+                .context("make_pmem_ext2 subcommand failed")
+        }
     }
 }
 

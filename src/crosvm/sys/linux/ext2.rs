@@ -26,13 +26,17 @@ use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use base::error;
 use base::linux::SharedMemoryLinux;
 use base::warn;
 use base::AsRawDescriptor;
+use base::MappedRegion;
+use base::MemoryMappingBuilder;
 use base::Pid;
+use base::Protection;
 use base::SharedMemory;
 use base::Tube;
 use jail::create_base_minijail;
@@ -45,6 +49,39 @@ use vm_control::api::VmMemoryClient;
 use vm_control::VmMemoryFileMapping;
 use vm_memory::GuestAddress;
 
+use crate::crosvm::sys::config::PmemExt2Option;
+
+/// Builds an image of `src` at `image` and writes its file mappings to `mappings`.
+pub fn make_image(src: &PmemExt2Option, image: &Path, mappings: &Path) -> Result<()> {
+    let mut builder = ext2::Builder {
+        inodes_per_group: src.inodes_per_group,
+        blocks_per_group: src.blocks_per_group,
+        root_dir: Some(src.path.clone()),
+        ..Default::default()
+    };
+    let paths = src.paths.as_deref().context("`paths` is required")?;
+    builder.paths = Some(ext2::read_paths_file(paths)?);
+    builder.set_auto_size(&src.path)?;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(image)
+        .with_context(|| format!("failed to create {}", image.display()))?;
+    file.set_len(builder.size)
+        .context("failed to size the image")?;
+    let shm = SharedMemory::from_file(file).context("failed to create shared memory from file")?;
+    let mapping_info = builder
+        .build_on_shm(&shm)
+        .context("failed to build memory region")?
+        .build_mmap_info()
+        .context("failed to build ext2")?
+        .mapping_info;
+    ext2::write_mappings(mappings, &mapping_info)
+}
+
 /// Starts a process to create an ext2 filesystem on a given shared memory region.
 pub fn launch(
     mapping_address: GuestAddress,
@@ -55,6 +92,7 @@ pub fn launch(
     ugid_map: (&str, &str),
     mut builder: ext2::Builder,
     backing_dir: Option<&Path>,
+    prebuilt: Option<(&Path, &Path)>, // (image, mappings) from `crosvm make_pmem_ext2`
     jail_config: Option<&JailConfig>,
 ) -> Result<Pid> {
     let max_open_files = base::linux::max_open_files()
@@ -80,8 +118,18 @@ pub fn launch(
     // Use "/" in the new mount namespace as the root for mkfs.
     builder.root_dir = Some(std::path::PathBuf::from("/"));
 
-    let shm = match backing_dir {
-        Some(dir) => {
+    let mut entries = None;
+    let shm = match (prebuilt, backing_dir) {
+        (Some((image, m)), _) => {
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC)
+                .open(image)
+                .with_context(|| format!("failed to open {}", image.display()))?;
+            entries = Some(ext2::read_mappings(m)?);
+            SharedMemory::from_file(file).context("failed to create shared memory from file")?
+        }
+        (None, Some(dir)) => {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -93,7 +141,7 @@ pub fn launch(
                 .context("failed to size backing file")?;
             SharedMemory::from_file(file).context("failed to create shared memory from file")?
         }
-        None => SharedMemory::new("pmem_ext2_shm", builder.size as u64)
+        (None, None) => SharedMemory::new("pmem_ext2_shm", builder.size as u64)
             .context("failed to create shared memory")?,
     };
     let mut keep_rds = vec![
@@ -104,8 +152,14 @@ pub fn launch(
     base::syslog::push_descriptors(&mut keep_rds);
 
     let child_process = fork_process(jail, keep_rds, Some(String::from("mkfs process")), || {
-        if let Err(e) = mkfs_callback(vm_memory_client, mapping_address, device_tube, builder, shm)
-        {
+        if let Err(e) = mkfs_callback(
+            vm_memory_client,
+            mapping_address,
+            device_tube,
+            builder,
+            shm,
+            entries,
+        ) {
             error!("failed to create file system: {:#}", e);
             // SAFETY: exit() is trivially safe.
             unsafe { libc::exit(1) };
@@ -123,17 +177,32 @@ fn mkfs_callback(
     device_tube: Tube, // Connects to a virtio device to send a memory slot number.
     builder: ext2::Builder,
     shm: SharedMemory,
+    entries: Option<Vec<ext2::MappingEntry>>,
 ) -> Result<()> {
-    let region = builder
-        .build_on_shm(&shm)
-        .context("failed to build memory region")?
-        .build_mmap_info()
-        .context("failed to build ext2")?;
-    // Only this process maps most of the image, so only it can page it out.
-    if let Err(e) = region.page_out() {
-        warn!("{:#}", e);
-    }
-    let file_mappings = region.mapping_info;
+    let file_mappings = match entries {
+        Some(entries) => {
+            if let Err(e) = page_out_resident(&shm) {
+                warn!("{:#}", e);
+            }
+            ext2::load_mappings(
+                entries,
+                builder.root_dir.as_deref().context("no root directory")?,
+            )
+            .context("failed to load file mappings")?
+        }
+        None => {
+            let region = builder
+                .build_on_shm(&shm)
+                .context("failed to build memory region")?
+                .build_mmap_info()
+                .context("failed to build ext2")?;
+            // Only this process maps most of the image, so only it can page it out.
+            if let Err(e) = region.page_out() {
+                warn!("{:#}", e);
+            }
+            region.mapping_info
+        }
+    };
 
     let file_mapping_info: Vec<_> = file_mappings
         .into_iter()
@@ -152,4 +221,28 @@ fn mkfs_callback(
         .send(&slot)
         .context("failed to send VmMemoryRequest::RegisterMemory")?;
     Ok(())
+}
+
+/// Pages out the resident pages of a prebuilt image. MADV_PAGEOUT only reaches mapped pages, and
+/// faulting in a hole would allocate it, so only the pages mincore() reports are touched.
+fn page_out_resident(shm: &SharedMemory) -> Result<()> {
+    let mem = MemoryMappingBuilder::new(shm.size() as usize)
+        .from_shared_memory(shm)
+        .protection(Protection::read())
+        .build()
+        .context("failed to map the image")?;
+    let page = base::pagesize();
+    let mut vec = vec![0u8; mem.size().div_ceil(page)];
+    // SAFETY: the mapping is valid for its size and `vec` has one byte per page.
+    if unsafe { libc::mincore(mem.as_ptr() as *mut libc::c_void, mem.size(), vec.as_mut_ptr()) }
+        != 0
+    {
+        bail!("mincore failed: {}", std::io::Error::last_os_error());
+    }
+    for (i, _) in vec.iter().enumerate().filter(|(_, v)| **v & 1 != 0) {
+        // SAFETY: the offset is within the mapping.
+        unsafe { std::ptr::read_volatile(mem.as_ptr().add(i * page)) };
+    }
+    <dyn MappedRegion>::madvise(&mem, 0, mem.size(), libc::MADV_PAGEOUT)
+        .context("failed to madvise(MADV_PAGEOUT)")
 }

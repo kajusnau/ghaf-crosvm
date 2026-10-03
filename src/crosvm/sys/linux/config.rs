@@ -295,6 +295,8 @@ pub struct PmemExt2Option {
     pub size: Option<u64>,
     pub paths: Option<PathBuf>,
     pub backing_dir: Option<PathBuf>,
+    pub image: Option<PathBuf>,
+    pub mappings: Option<PathBuf>,
     pub ugid: (Option<u32>, Option<u32>),
     pub uid_map: String,
     pub gid_map: String,
@@ -312,6 +314,8 @@ impl Default for PmemExt2Option {
             size: None,
             paths: None,
             backing_dir: None,
+            image: None,
+            mappings: None,
             ugid: (ugid_cfg.uid, ugid_cfg.gid),
             uid_map: ugid_cfg.uid_map,
             gid_map: ugid_cfg.gid_map,
@@ -360,8 +364,20 @@ pub fn parse_pmem_ext2_option(param: &str) -> Result<PmemExt2Option, String> {
                 }
                 "paths" => opt.paths = Some(PathBuf::from(value)),
                 "backing_dir" => opt.backing_dir = Some(PathBuf::from(value)),
+                "image" => opt.image = Some(PathBuf::from(value)),
+                "mappings" => opt.mappings = Some(PathBuf::from(value)),
                 _ => return Err(format!("invalid `pmem-ext2` option: {kind}")),
             }
+        }
+    }
+    if opt.image.is_some() {
+        if opt.mappings.is_none() {
+            return Err("`pmem-ext2` option `image` requires `mappings`".to_string());
+        }
+        if opt.size.is_some() || opt.backing_dir.is_some() {
+            return Err(
+                "`pmem-ext2` option `image` conflicts with `size` and `backing_dir`".to_string(),
+            );
         }
     }
     opt.ugid = (ugid_cfg.uid, ugid_cfg.gid);
@@ -1095,5 +1111,14 @@ mod tests {
     fn parse_pmem_ext2_backing_dir() {
         let opt = parse_pmem_ext2_option("/path:backing_dir=/var/lib/crosvm").unwrap();
         assert_eq!(opt.backing_dir, Some(PathBuf::from("/var/lib/crosvm")));
+    }
+
+    #[test]
+    fn parse_pmem_ext2_image() {
+        let opt = parse_pmem_ext2_option("/nix/store:image=/i:mappings=/m").unwrap();
+        assert_eq!(opt.image, Some(PathBuf::from("/i")));
+        assert_eq!(opt.mappings, Some(PathBuf::from("/m")));
+        assert!(parse_pmem_ext2_option("/nix/store:image=/i").is_err());
+        assert!(parse_pmem_ext2_option("/nix/store:image=/i:mappings=/m:size=4096").is_err());
     }
 }

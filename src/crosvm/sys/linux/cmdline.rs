@@ -17,6 +17,8 @@ use devices::SerialParameters;
 use jail::JailConfig;
 
 use crate::crosvm::config::validate_serial_parameters;
+use crate::crosvm::sys::config::parse_pmem_ext2_option;
+use crate::crosvm::sys::config::PmemExt2Option;
 
 #[derive(FromArgs)]
 #[argh(subcommand)]
@@ -134,4 +136,25 @@ pub struct DevicesCommand {
 pub enum Commands {
     #[cfg(any(target_os = "android", target_os = "linux"))]
     Devices(DevicesCommand),
+    MakePmemExt2(MakePmemExt2Command),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "make_pmem_ext2")]
+/// Build a pmem-ext2 image to load with `--pmem-ext2 SRC:image=...`
+pub struct MakePmemExt2Command {
+    #[argh(
+        positional,
+        arg_name = "SRC[:key=value[:key=value[:...]]]",
+        from_str_fn(parse_pmem_ext2_option)
+    )]
+    /// source directory with the `paths`, `blocks_per_group` and `inodes_per_group` options of
+    /// `--pmem-ext2`
+    pub src: PmemExt2Option,
+    #[argh(positional, arg_name = "IMAGE")]
+    /// path of the image to create
+    pub image: PathBuf,
+    #[argh(positional, arg_name = "MAPPINGS")]
+    /// path of the mappings file to create
+    pub mappings: PathBuf,
 }

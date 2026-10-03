@@ -901,3 +901,98 @@ fn test_mkfs_on_file_backed_shm() {
         "2  (12) .    2  (12) ..    11  (4072) lost+found"
     );
 }
+
+#[test]
+fn test_shared_image_mappings() {
+    use base::linux::SharedMemoryLinux;
+    use base::SharedMemory;
+
+    let td = tempdir().unwrap();
+    let dir = td.path().join("testdata");
+    create_dir(&dir).unwrap();
+    create_dir(dir.join("a")).unwrap();
+    create_dir(dir.join("b")).unwrap();
+    fs::write(dir.join("a/f"), vec![0xaau8; 3 * BLOCK_SIZE as usize]).unwrap();
+    fs::write(dir.join("b/f"), vec![0xbbu8; BLOCK_SIZE as usize]).unwrap();
+
+    let mut builder = Builder {
+        blocks_per_group: 1024,
+        inodes_per_group: 1024,
+        root_dir: Some(dir.clone()),
+        paths: Some(vec!["a".into(), "b".into()]),
+        ..Default::default()
+    };
+    builder.set_auto_size(&dir).unwrap();
+    let image = td.path().join("store.img");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&image)
+        .unwrap();
+    file.set_len(builder.size).unwrap();
+    let shm = SharedMemory::from_file(file).unwrap();
+    let mappings = builder
+        .build_on_shm(&shm)
+        .unwrap()
+        .build_mmap_info()
+        .unwrap()
+        .mapping_info;
+    let map = td.path().join("store.map");
+    ext2::write_mappings(&map, &mappings).unwrap();
+
+    let mut loaded = ext2::load_mappings(ext2::read_mappings(&map).unwrap(), &dir).unwrap();
+    loaded.sort_by(|x, y| x.path.cmp(&y.path));
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0].path, PathBuf::from("a/f"));
+    assert_eq!(loaded[0].length, 3 * BLOCK_SIZE as usize);
+    symlink(dir.join("b/f"), dir.join("a/l")).unwrap();
+    let load_a = |line: String| {
+        fs::write(&map, line).unwrap();
+        ext2::load_mappings(ext2::read_mappings(&map).unwrap(), &dir)
+    };
+    assert!(load_a("0 0 4096 a/l\0".to_string()).is_err());
+    assert!(load_a(format!("{} 0 4096 a/f\0", u64::MAX)).is_err());
+}
+
+#[test]
+fn test_mappings_round_trip() {
+    let td = tempdir().unwrap();
+    let src = td.path().join("f");
+    fs::write(&src, b"x").unwrap();
+    let info = |path: &str, file_offset, mem_offset, length| ext2::FileMappingInfo {
+        mem_offset,
+        file: File::open(&src).unwrap(),
+        length,
+        file_offset,
+        path: PathBuf::from(path),
+    };
+    let map = td.path().join("map");
+    ext2::write_mappings(
+        &map,
+        &[
+            info("a/f", 0, 4096, 10),
+            info("b/g  h\nx", 1 << 20, 1 << 33, 8192),
+        ],
+    )
+    .unwrap();
+    let entry = |path: &str, file_offset, mem_offset, length| ext2::MappingEntry {
+        path: PathBuf::from(path),
+        file_offset,
+        mem_offset,
+        length,
+    };
+    assert_eq!(
+        ext2::read_mappings(&map).unwrap(),
+        vec![
+            entry("a/f", 0, 4096, 10),
+            entry("b/g  h\nx", 1 << 20, 1 << 33, 8192)
+        ]
+    );
+
+    for bad in ["0 4096 a/f\0", "0 x 1 a/f\0", "0 4096 1 \0", "0 4096 1 a/f"] {
+        fs::write(&map, bad).unwrap();
+        assert!(ext2::read_mappings(&map).is_err(), "{bad:?}");
+    }
+}

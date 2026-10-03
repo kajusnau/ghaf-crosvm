@@ -1698,6 +1698,10 @@ pub struct RunCommand {
     ///     backing_dir=DIR - Back the file system image with an
     ///       unlinked file in DIR instead of anonymous shared
     ///       memory, so its pages can be reclaimed.
+    ///     image=FILE - Use a prebuilt image from
+    ///       `crosvm make_pmem_ext2` instead of building one. The
+    ///       image is mapped read-only. Requires `mappings`.
+    ///     mappings=FILE - Mappings file written alongside `image`.
     ///     uid=UID - uid of the mkfs process in the user
     ///       namespace created by minijail. (default: 0)
     ///     gid=GID - gid of the mkfs process in the user
