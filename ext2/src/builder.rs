@@ -152,6 +152,12 @@ pub struct MemRegionWithMappingInfo {
 }
 
 impl MemRegionWithMappingInfo {
+    /// Asks the kernel to reclaim the written metadata pages, e.g. into zswap.
+    pub fn page_out(&self) -> Result<()> {
+        <dyn MappedRegion>::madvise(&self.mem, 0, self.mem.size(), libc::MADV_PAGEOUT)
+            .context("failed to madvise(MADV_PAGEOUT)")
+    }
+
     /// Do mmap and returns the memory region where ext2 was created.
     pub fn do_mmap(self) -> Result<MemoryMappingArena> {
         let mut mmap_arena = MemoryMappingArena::from(self.mem);
