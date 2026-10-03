@@ -44,6 +44,39 @@ use vm_control::api::VmMemoryClient;
 use vm_control::VmMemoryFileMapping;
 use vm_memory::GuestAddress;
 
+use crate::crosvm::sys::config::PmemExt2Option;
+
+/// Builds an image of `src` at `image` and writes its file mappings to `mappings`.
+pub fn make_image(src: &PmemExt2Option, image: &Path, mappings: &Path) -> Result<()> {
+    let mut builder = ext2::Builder {
+        inodes_per_group: src.inodes_per_group,
+        blocks_per_group: src.blocks_per_group,
+        root_dir: Some(src.path.clone()),
+        ..Default::default()
+    };
+    let paths = src.paths.as_deref().context("`paths` is required")?;
+    builder.paths = Some(ext2::read_paths_file(paths)?);
+    builder.set_auto_size(&src.path)?;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(image)
+        .with_context(|| format!("failed to create {}", image.display()))?;
+    file.set_len(builder.size)
+        .context("failed to size the image")?;
+    let shm = SharedMemory::from_file(file).context("failed to create shared memory from file")?;
+    let mapping_info = builder
+        .build_on_shm(&shm)
+        .context("failed to build memory region")?
+        .build_mmap_info()
+        .context("failed to build ext2")?
+        .mapping_info;
+    ext2::write_mappings(mappings, &mapping_info)
+}
+
 /// Starts a process to create an ext2 filesystem on a given shared memory region.
 pub fn launch(
     mapping_address: GuestAddress,
@@ -54,6 +87,7 @@ pub fn launch(
     ugid_map: (&str, &str),
     mut builder: ext2::Builder,
     backing_dir: Option<&Path>,
+    prebuilt: Option<(&Path, &Path)>, // (image, mappings) from `crosvm make_pmem_ext2`
     jail_config: Option<&JailConfig>,
 ) -> Result<Pid> {
     let max_open_files = base::linux::max_open_files()
@@ -79,8 +113,20 @@ pub fn launch(
     // Use "/" in the new mount namespace as the root for mkfs.
     builder.root_dir = Some(std::path::PathBuf::from("/"));
 
-    let shm = match backing_dir {
-        Some(dir) => {
+    let mut mappings = None;
+    let shm = match (prebuilt, backing_dir) {
+        (Some((image, m)), _) => {
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC)
+                .open(image)
+                .with_context(|| format!("failed to open {}", image.display()))?;
+            let root = ext2::filter_root_dir(&file, builder.paths.as_deref().context("no paths")?)
+                .context("failed to filter the root directory")?;
+            mappings = Some((ext2::read_mappings(m)?, root));
+            SharedMemory::from_file(file).context("failed to create shared memory from file")?
+        }
+        (None, Some(dir)) => {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -92,7 +138,7 @@ pub fn launch(
                 .context("failed to size backing file")?;
             SharedMemory::from_file(file).context("failed to create shared memory from file")?
         }
-        None => SharedMemory::new("pmem_ext2_shm", builder.size as u64)
+        (None, None) => SharedMemory::new("pmem_ext2_shm", builder.size as u64)
             .context("failed to create shared memory")?,
     };
     let mut keep_rds = vec![
@@ -100,11 +146,20 @@ pub fn launch(
         vm_memory_client.as_raw_descriptor(),
         device_tube.as_raw_descriptor(),
     ];
+    if let Some((_, root)) = &mappings {
+        keep_rds.extend(root.iter().map(|m| m.file.as_raw_descriptor()));
+    }
     base::syslog::push_descriptors(&mut keep_rds);
 
     let child_process = fork_process(jail, keep_rds, Some(String::from("mkfs process")), || {
-        if let Err(e) = mkfs_callback(vm_memory_client, mapping_address, device_tube, builder, shm)
-        {
+        if let Err(e) = mkfs_callback(
+            vm_memory_client,
+            mapping_address,
+            device_tube,
+            builder,
+            shm,
+            mappings,
+        ) {
             error!("failed to create file system: {:#}", e);
             // SAFETY: exit() is trivially safe.
             unsafe { libc::exit(1) };
@@ -122,13 +177,28 @@ fn mkfs_callback(
     device_tube: Tube, // Connects to a virtio device to send a memory slot number.
     builder: ext2::Builder,
     shm: SharedMemory,
+    mappings: Option<(Vec<ext2::MappingEntry>, Vec<ext2::FileMappingInfo>)>,
 ) -> Result<()> {
-    let file_mappings = builder
-        .build_on_shm(&shm)
-        .context("failed to build memory region")?
-        .build_mmap_info()
-        .context("failed to build ext2")?
-        .mapping_info;
+    let file_mappings = match mappings {
+        Some((entries, root)) => {
+            let mut m = ext2::load_mappings(
+                entries,
+                builder.root_dir.as_deref().context("no root directory")?,
+                builder.paths.as_deref().context("no paths")?,
+            )
+            .context("failed to load file mappings")?;
+            m.extend(root);
+            m
+        }
+        None => {
+            builder
+                .build_on_shm(&shm)
+                .context("failed to build memory region")?
+                .build_mmap_info()
+                .context("failed to build ext2")?
+                .mapping_info
+        }
+    };
 
     let file_mapping_info: Vec<_> = file_mappings
         .into_iter()

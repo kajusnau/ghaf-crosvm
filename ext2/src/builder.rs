@@ -127,13 +127,18 @@ impl MemRegion {
     pub fn build_mmap_info(mut self) -> Result<MemRegionWithMappingInfo> {
         let arena = Arena::new(BLOCK_SIZE, &mut self.mem).context("failed to allocate arena")?;
         let mut ext2 = Ext2::new(&self.cfg, &arena).context("failed to create Ext2 struct")?;
-        if let Some(dir) = self.cfg.root_dir {
+        if let Some(dir) = &self.cfg.root_dir {
             ext2.copy_dirtree(&arena, dir, self.cfg.paths.as_deref())
                 .context("failed to copy directory tree")?;
         }
         ext2.copy_backup_metadata(&arena)
             .context("failed to copy metadata for backup")?;
-        let mapping_info = arena.into_mapping_info();
+        let mut mapping_info = arena.into_mapping_info();
+        if let Some(dir) = &self.cfg.root_dir {
+            for info in &mut mapping_info {
+                info.path = info.path.strip_prefix(dir)?.to_path_buf();
+            }
+        }
 
         self.mem
             .msync()
@@ -160,6 +165,7 @@ impl MemRegionWithMappingInfo {
             file,
             length,
             file_offset,
+            ..
         } in self.mapping_info
         {
             mmap_arena

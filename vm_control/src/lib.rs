@@ -880,8 +880,10 @@ impl VmMemoryRequest {
                 // Define a callback to be executed with extended limit of file counts.
                 // It recieves `num_file_mappings` FDs and call `add_fd_mapping` for each.
                 let callback = || {
+                    // Read-only: a prebuilt pmem-ext2 image is shared by every VM.
                     let mem = match MemoryMappingBuilder::new(shm.size() as usize)
                         .from_shared_memory(&shm)
+                        .protection(Protection::read())
                         .build()
                         .context("failed to build MemoryMapping from shared memory")
                     {

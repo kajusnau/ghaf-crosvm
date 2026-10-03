@@ -495,6 +495,7 @@ impl<'a> Ext2<'a> {
         arena: &'a Arena<'a>,
         block_num: usize,
         file: &File,
+        path: &Path,
         file_size: usize,
         mut file_offset: usize,
     ) -> Result<(Vec<BlockId>, usize)> {
@@ -516,6 +517,7 @@ impl<'a> Ext2<'a> {
                     length,
                     file.try_clone().context("failed to clone file")?,
                     file_offset,
+                    path,
                 )
                 .context("mmap for direct_block is already occupied")?;
             remaining -= length;
@@ -530,6 +532,7 @@ impl<'a> Ext2<'a> {
         arena: &'a Arena<'a>,
         indirect_table: BlockId,
         file: &File,
+        path: &Path,
         file_size: usize,
         file_offset: usize,
     ) -> Result<usize> {
@@ -544,7 +547,7 @@ impl<'a> Ext2<'a> {
         let block_num = length.div_ceil(BLOCK_SIZE);
 
         let (allocated_blocks, length) = self
-            .register_mmap_file(arena, block_num, file, file_size, file_offset)
+            .register_mmap_file(arena, block_num, file, path, file_size, file_offset)
             .context("failed to reserve mmap regions on indirect block")?;
 
         let slice = arena.allocate_slice(indirect_table, 0, 4 * block_num)?;
@@ -577,7 +580,7 @@ impl<'a> Ext2<'a> {
                 InodeBlock::NUM_DIRECT_BLOCKS,
             );
             let (allocated_blocks, len) = self
-                .register_mmap_file(arena, block_num, &file, file_size, 0)
+                .register_mmap_file(arena, block_num, &file, path, file_size, 0)
                 .context("failed to reserve mmap regions on direct block")?;
 
             block.set_direct_blocks(&allocated_blocks)?;
@@ -592,7 +595,7 @@ impl<'a> Ext2<'a> {
             used_blocks += 1;
 
             let length =
-                self.fill_indirect_block(arena, indirect_table, &file, file_size, written)?;
+                self.fill_indirect_block(arena, indirect_table, &file, path, file_size, written)?;
             written += length;
             used_blocks += length.div_ceil(BLOCK_SIZE);
         }
@@ -616,7 +619,7 @@ impl<'a> Ext2<'a> {
                 used_blocks += 1;
 
                 let length = self
-                    .fill_indirect_block(arena, indirect_table, &file, file_size, written)
+                    .fill_indirect_block(arena, indirect_table, &file, path, file_size, written)
                     .context("failed to indirect block for doubly-indirect table")?;
                 written += length;
                 used_blocks += length.div_ceil(BLOCK_SIZE);

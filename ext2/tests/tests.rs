@@ -901,3 +901,205 @@ fn test_mkfs_on_file_backed_shm() {
         "2  (12) .    2  (12) ..    11  (4072) lost+found"
     );
 }
+
+#[test]
+fn test_shared_image_mappings() {
+    use base::linux::SharedMemoryLinux;
+    use base::SharedMemory;
+
+    let td = tempdir().unwrap();
+    let dir = td.path().join("testdata");
+    create_dir(&dir).unwrap();
+    create_dir(dir.join("a")).unwrap();
+    create_dir(dir.join("b")).unwrap();
+    fs::write(dir.join("a/f"), vec![0xaau8; 3 * BLOCK_SIZE as usize]).unwrap();
+    fs::write(dir.join("b/f"), vec![0xbbu8; BLOCK_SIZE as usize]).unwrap();
+
+    let mut builder = Builder {
+        blocks_per_group: 1024,
+        inodes_per_group: 1024,
+        root_dir: Some(dir.clone()),
+        paths: Some(vec!["a".into(), "b".into()]),
+        ..Default::default()
+    };
+    builder.set_auto_size(&dir).unwrap();
+    let image = td.path().join("store.img");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&image)
+        .unwrap();
+    file.set_len(builder.size).unwrap();
+    let shm = SharedMemory::from_file(file).unwrap();
+    let mappings = builder
+        .build_on_shm(&shm)
+        .unwrap()
+        .build_mmap_info()
+        .unwrap()
+        .mapping_info;
+    let map = td.path().join("store.map");
+    ext2::write_mappings(&map, &mappings).unwrap();
+
+    let loaded =
+        ext2::load_mappings(ext2::read_mappings(&map).unwrap(), &dir, &["a".into()]).unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].path, PathBuf::from("a/f"));
+    assert_eq!(loaded[0].length, 3 * BLOCK_SIZE as usize);
+    assert!(
+        ext2::load_mappings(ext2::read_mappings(&map).unwrap(), &dir, &["c".into()])
+            .unwrap()
+            .is_empty()
+    );
+    symlink(dir.join("b/f"), dir.join("a/l")).unwrap();
+    let load_a = |line: String| {
+        fs::write(&map, line).unwrap();
+        ext2::load_mappings(ext2::read_mappings(&map).unwrap(), &dir, &["a".into()])
+    };
+    assert!(load_a("0 0 4096 a/l\0".to_string()).is_err());
+    assert!(load_a(format!("{} 0 4096 a/f\0", u64::MAX)).is_err());
+}
+
+#[test]
+fn test_filter_root_dir() {
+    use base::linux::SharedMemoryLinux;
+    use std::os::unix::fs::FileExt;
+
+    let td = tempdir().unwrap();
+    let dir = td.path().join("testdata");
+    create_dir(&dir).unwrap();
+    for name in ["a", "b", "c"] {
+        create_dir(dir.join(name)).unwrap();
+        fs::write(dir.join(name).join("f"), name.repeat(5000)).unwrap();
+    }
+    // Long filtered-out names push the root directory past its 12 direct blocks.
+    let mut paths: Vec<std::ffi::OsString> = vec!["a".into(), "b".into(), "c".into()];
+    for i in 0..300 {
+        let name = format!("{i:0>200}");
+        File::create(dir.join(&name)).unwrap();
+        paths.push(name.into());
+    }
+    let mut builder = Builder {
+        blocks_per_group: 1024,
+        inodes_per_group: 1024,
+        root_dir: Some(dir.clone()),
+        paths: Some(paths),
+        ..Default::default()
+    };
+    builder.set_auto_size(&dir).unwrap();
+    let image = td.path().join("store.img");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&image)
+        .unwrap();
+    file.set_len(builder.size).unwrap();
+    let shm = base::SharedMemory::from_file(file.try_clone().unwrap()).unwrap();
+    let mappings = builder
+        .build_on_shm(&shm)
+        .unwrap()
+        .build_mmap_info()
+        .unwrap()
+        .mapping_info;
+    let map = td.path().join("store.map");
+    ext2::write_mappings(&map, &mappings).unwrap();
+
+    // With 240 long names the 13 compact blocks still need the indirect table; without, 1 block.
+    for (long, k) in [(240, 13), (0, 1)] {
+        let mut allowed: Vec<std::ffi::OsString> = vec!["a".into(), "c".into()];
+        allowed.extend((0..long).map(|i| format!("{i:0>200}").into()));
+        let root = ext2::filter_root_dir(&file, &allowed).unwrap();
+        assert_eq!(root.len(), k + 1 + (k > 12) as usize);
+        let data = ext2::load_mappings(ext2::read_mappings(&map).unwrap(), &dir, &allowed).unwrap();
+        let copy = td.path().join("vm.img");
+        fs::copy(&image, &copy).unwrap();
+        let out = OpenOptions::new().write(true).open(&copy).unwrap();
+        for m in root.iter().chain(&data) {
+            let mut buf = vec![0u8; m.length];
+            m.file
+                .read_exact_at(&mut buf, m.file_offset as u64)
+                .unwrap();
+            out.write_all_at(&buf, m.mem_offset as u64).unwrap();
+        }
+
+        let ls = run_debugfs_cmd(&["ls -p /"], &copy);
+        let names: BTreeSet<&str> = ls.lines().map(|l| l.split('/').nth(5).unwrap()).collect();
+        let mut expected: BTreeSet<&str> = allowed.iter().map(|n| n.to_str().unwrap()).collect();
+        expected.extend([".", "..", "lost+found"]);
+        assert_eq!(names, expected);
+        let stat = run_debugfs_cmd(&["stat /"], &copy);
+        assert!(
+            stat.contains(&format!("Size: {}", k as u32 * BLOCK_SIZE)),
+            "{stat}"
+        );
+        let fsck = Command::new(FSCK_PATH)
+            .arg("-fn")
+            .arg(&copy)
+            .output()
+            .unwrap();
+        let fsck = String::from_utf8_lossy(&fsck.stdout);
+        println!("{fsck}");
+        // Only the hidden entries' inodes, link counts and the root's freed blocks may differ.
+        let allowed_errors = [
+            "Pass ",
+            "Unattached inode ",
+            "Unconnected directory inode ",
+            "Connect to /lost+found? no",
+            "'..' in ",
+            "Fix? no",
+            "Block bitmap differences: ",
+            "/",
+        ];
+        for line in fsck.lines().filter(|l| !l.is_empty()) {
+            let ok = allowed_errors.iter().any(|a| line.starts_with(a))
+                || (line.starts_with("Inode ") && line.contains(" ref count is "));
+            assert!(ok, "{line}");
+        }
+        assert_eq!(run_debugfs_cmd(&["cat /a/f"], &copy), "a".repeat(5000));
+        assert_eq!(run_debugfs_cmd(&["cat /c/f"], &copy), "c".repeat(5000));
+    }
+}
+
+#[test]
+fn test_mappings_round_trip() {
+    let td = tempdir().unwrap();
+    let src = td.path().join("f");
+    fs::write(&src, b"x").unwrap();
+    let info = |path: &str, file_offset, mem_offset, length| ext2::FileMappingInfo {
+        mem_offset,
+        file: File::open(&src).unwrap(),
+        length,
+        file_offset,
+        path: PathBuf::from(path),
+    };
+    let map = td.path().join("map");
+    ext2::write_mappings(
+        &map,
+        &[
+            info("a/f", 0, 4096, 10),
+            info("b/g  h\nx", 1 << 20, 1 << 33, 8192),
+        ],
+    )
+    .unwrap();
+    let entry = |path: &str, file_offset, mem_offset, length| ext2::MappingEntry {
+        path: PathBuf::from(path),
+        file_offset,
+        mem_offset,
+        length,
+    };
+    assert_eq!(
+        ext2::read_mappings(&map).unwrap(),
+        vec![
+            entry("a/f", 0, 4096, 10),
+            entry("b/g  h\nx", 1 << 20, 1 << 33, 8192)
+        ]
+    );
+
+    for bad in ["0 4096 a/f\0", "0 x 1 a/f\0", "0 4096 1 \0", "0 4096 1 a/f"] {
+        fs::write(&map, bad).unwrap();
+        assert!(ext2::read_mappings(&map).is_err(), "{bad:?}");
+    }
+}
