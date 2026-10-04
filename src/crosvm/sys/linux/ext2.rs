@@ -181,7 +181,7 @@ fn mkfs_callback(
 ) -> Result<()> {
     let file_mappings = match entries {
         Some(entries) => {
-            if let Err(e) = page_out_resident(&shm) {
+            if let Err(e) = page_out_image(&shm) {
                 warn!("{:#}", e);
             }
             ext2::load_mappings(
@@ -223,25 +223,34 @@ fn mkfs_callback(
     Ok(())
 }
 
-/// Pages out the resident pages of a prebuilt image. MADV_PAGEOUT only reaches mapped pages, and
-/// faulting in a hole would allocate it, so only the pages mincore() reports are touched.
-fn page_out_resident(shm: &SharedMemory) -> Result<()> {
+/// Pages out the allocated pages of a prebuilt image. MADV_PAGEOUT only reaches mapped pages, and
+/// faulting in a hole would allocate it, so only SEEK_DATA ranges are touched (mincore() reports
+/// every page resident for a file the caller cannot write).
+fn page_out_image(shm: &SharedMemory) -> Result<()> {
     let mem = MemoryMappingBuilder::new(shm.size() as usize)
         .from_shared_memory(shm)
         .protection(Protection::read())
         .build()
         .context("failed to map the image")?;
-    let page = base::pagesize();
-    let mut vec = vec![0u8; mem.size().div_ceil(page)];
-    // SAFETY: the mapping is valid for its size and `vec` has one byte per page.
-    if unsafe { libc::mincore(mem.as_ptr() as *mut libc::c_void, mem.size(), vec.as_mut_ptr()) }
-        != 0
-    {
-        bail!("mincore failed: {}", std::io::Error::last_os_error());
-    }
-    for (i, _) in vec.iter().enumerate().filter(|(_, v)| **v & 1 != 0) {
-        // SAFETY: the offset is within the mapping.
-        unsafe { std::ptr::read_volatile(mem.as_ptr().add(i * page)) };
+    let fd = shm.as_raw_descriptor();
+    let page = base::pagesize() as i64;
+    let mut off = 0;
+    while off < mem.size() as i64 {
+        // SAFETY: lseek on a valid descriptor; ENXIO past the last data range ends the loop.
+        let start = unsafe { libc::lseek64(fd, off, libc::SEEK_DATA) };
+        if start < 0 {
+            break;
+        }
+        // SAFETY: as above.
+        let end = unsafe { libc::lseek64(fd, start, libc::SEEK_HOLE) };
+        if end < 0 {
+            bail!("lseek failed: {}", std::io::Error::last_os_error());
+        }
+        for p in (start / page * page..end.min(mem.size() as i64)).step_by(page as usize) {
+            // SAFETY: the offset is within the mapping.
+            unsafe { std::ptr::read_volatile(mem.as_ptr().add(p as usize)) };
+        }
+        off = end;
     }
     <dyn MappedRegion>::madvise(&mem, 0, mem.size(), libc::MADV_PAGEOUT)
         .context("failed to madvise(MADV_PAGEOUT)")
