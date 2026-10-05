@@ -1279,6 +1279,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "zerocopy 0.8.14",
+ "zstd",
 ]
 
 [[package]]
