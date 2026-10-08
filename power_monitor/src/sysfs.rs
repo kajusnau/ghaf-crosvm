@@ -79,14 +79,23 @@ fn read_power_data(root: &Path) -> std::io::Result<PowerData> {
                 if read_string(&path.join("present")).as_deref() == Some("0") {
                     continue;
                 }
+                let voltage = read_u32(&path.join("voltage_now"));
+                // Energy-based batteries report µW/µWh only; convert to µA/µAh.
+                let charge = |charge_file: &str, energy_file: &str| {
+                    if path.join(charge_file).exists() || voltage == 0 {
+                        return read_u32(&path.join(charge_file));
+                    }
+                    let energy = u64::from(read_u32(&path.join(energy_file)));
+                    u32::try_from(energy * 1_000_000 / u64::from(voltage)).unwrap_or(u32::MAX)
+                };
                 battery = Some(BatteryData {
                     status: read_status(&path.join("status")),
                     health: read_health(&path.join("health")),
                     percent: read_u32(&path.join("capacity")).min(100),
-                    voltage: read_u32(&path.join("voltage_now")),
-                    current: read_u32(&path.join("current_now")),
-                    charge_counter: read_u32(&path.join("charge_now")),
-                    charge_full: read_u32(&path.join("charge_full")),
+                    voltage,
+                    current: charge("current_now", "power_now"),
+                    charge_counter: charge("charge_now", "energy_now"),
+                    charge_full: charge("charge_full", "energy_full"),
                 });
             }
             Some("Mains" | "USB" | "USB_C" | "USB_DCP" | "USB_CDP" | "USB_ACA") => {
@@ -211,6 +220,21 @@ mod tests {
         assert_eq!(battery.status, BatteryStatus::Discharging);
         assert_eq!(battery.health, BatteryHealth::Good);
         assert_eq!(battery.voltage, 12_000_000);
+    }
+
+    #[test]
+    fn derives_charge_from_energy_battery() {
+        let root = tempfile::tempdir().unwrap();
+        write_property(root.path(), "BAT0", "type", "Battery\n");
+        write_property(root.path(), "BAT0", "voltage_now", "16000000\n");
+        write_property(root.path(), "BAT0", "power_now", "16000000\n");
+        write_property(root.path(), "BAT0", "energy_now", "48000000\n");
+        write_property(root.path(), "BAT0", "energy_full", "56000000\n");
+
+        let battery = read_power_data(root.path()).unwrap().battery.unwrap();
+        assert_eq!(battery.current, 1_000_000);
+        assert_eq!(battery.charge_counter, 3_000_000);
+        assert_eq!(battery.charge_full, 3_500_000);
     }
 
     #[test]
