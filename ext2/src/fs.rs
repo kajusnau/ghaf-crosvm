@@ -13,6 +13,8 @@ use std::fs::DirEntry;
 use std::fs::File;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use anyhow::anyhow;
 use anyhow::bail;
@@ -840,17 +842,44 @@ fn dir_entries(dir: &Path, paths: Option<&[OsString]>) -> Result<Vec<DirEntry>> 
 
 /// Counts the blocks and inodes that copying `dir` (filtered by `paths`) allocates.
 fn count_usage(dir: &Path, paths: Option<&[OsString]>, root: bool) -> Result<(u64, u64)> {
-    let entries = dir_entries(dir, paths)?;
+    let mut entries = dir_entries(dir, paths)?;
     let mut names: Vec<OsString> = vec![".".into(), "..".into()];
     if root {
         names.push("lost+found".into());
+        entries.retain(|e| {
+            !(e.file_name() == "lost+found" && e.file_type().is_ok_and(|t| t.is_dir()))
+        });
     }
+    names.extend(entries.iter().map(DirEntry::file_name));
+    let (mut blocks, inodes) = if root {
+        par_entries_usage(&entries)?
+    } else {
+        entries_usage(&entries, &AtomicUsize::new(0))?
+    };
+    blocks += dir_blocks(&names);
+    Ok((blocks, inodes))
+}
+
+/// Walks the root's entries on several threads, so the cold metadata reads overlap.
+fn par_entries_usage(entries: &[DirEntry]) -> Result<(u64, u64)> {
+    let next = AtomicUsize::new(0);
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
+    std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| s.spawn(|| entries_usage(entries, &next)))
+            .collect();
+        workers.into_iter().try_fold((0, 0), |(b, i), w| {
+            let (wb, wi) = w.join().map_err(|_| anyhow!("a size walker panicked"))??;
+            Ok((b + wb, i + wi))
+        })
+    })
+}
+
+/// Sums the usage of the entries claimed from `next` until none are left.
+fn entries_usage(entries: &[DirEntry], next: &AtomicUsize) -> Result<(u64, u64)> {
     let (mut blocks, mut inodes) = (0, 0);
-    for entry in entries {
+    while let Some(entry) = entries.get(next.fetch_add(1, Ordering::Relaxed)) {
         let ftype = entry.file_type()?;
-        if root && ftype.is_dir() && entry.file_name() == "lost+found" {
-            continue;
-        }
         inodes += 1;
         if ftype.is_dir() {
             let (b, i) = count_usage(&entry.path(), None, false)?;
@@ -873,9 +902,7 @@ fn count_usage(dir: &Path, paths: Option<&[OsString]>, root: bool) -> Result<(u6
         {
             blocks += 1;
         }
-        names.push(entry.file_name());
     }
-    blocks += dir_blocks(&names);
     Ok((blocks, inodes))
 }
 
